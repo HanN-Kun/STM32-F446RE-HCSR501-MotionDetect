@@ -40,16 +40,23 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim4;
+
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-uint8_t last_state = 0;
+volatile uint8_t motion_flag = 0;   // kesme bu bayrağı kaldırır
+uint8_t alarm_active = 0;           // 0 = Bekleme, 1 = Alarm
+uint8_t buzzer_on = 0;
+uint32_t alarm_start = 0;           // alarmın (en son harekette) başladığı an
+uint32_t last_toggle = 0;           // buzzer'ın son açılıp kapandığı an
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -89,8 +96,10 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
-
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 0);   // başta sessiz
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -100,27 +109,45 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  uint8_t state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_0);
-
-	      if (state != last_state)
+	  if (motion_flag)
 	      {
-	          last_state = state;
+	          motion_flag = 0;
+	          alarm_start = HAL_GetTick();          // süreyi baştan başlat
 
-	          if (state == GPIO_PIN_SET)
+	          if (!alarm_active)
 	          {
+	              alarm_active = 1;
 	              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-	              HAL_UART_Transmit(&huart2, (uint8_t*)"Motion Detected\r\n", 17, 100);
+	              HAL_UART_Transmit(&huart2, (uint8_t*)"ALARM ON\r\n", 10, 100);
 	          }
 	          else
 	          {
-	              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-	              HAL_UART_Transmit(&huart2, (uint8_t*)"Motion Ended\r\n", 14, 100);
+	              HAL_UART_Transmit(&huart2, (uint8_t*)"Motion again, alarm extended\r\n", 30, 100);
 	          }
 	      }
 
-	      HAL_Delay(50);
+	      // 2) Alarm sırasında buzzer'ı kesik kesik öttür
+	      if (alarm_active)
+	      {
+	          if (HAL_GetTick() - last_toggle >= 250)
+	          {
+	              last_toggle = HAL_GetTick();
+	              buzzer_on = !buzzer_on;
+	              __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, buzzer_on ? 500 : 0);
+	          }
+
+	          // 3) 10 saniye hareket gelmediyse alarmı kapat
+	          if (HAL_GetTick() - alarm_start >= 10000)
+	          {
+	              alarm_active = 0;
+	              buzzer_on = 0;
+	              __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 0);
+	              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+	              HAL_UART_Transmit(&huart2, (uint8_t*)"ALARM OFF\r\n", 11, 100);
+	          }
   }
   /* USER CODE END 3 */
+}
 }
 
 /**
@@ -162,6 +189,65 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 15;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 999;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+  HAL_TIM_MspPostInit(&htim4);
+
 }
 
 /**
@@ -225,9 +311,13 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : PB0 */
   GPIO_InitStruct.Pin = GPIO_PIN_0;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -235,7 +325,13 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == GPIO_PIN_0)
+    {
+        motion_flag = 1;   // ağır işi burada yapma, sadece bayrağı kaldır
+    }
+}
 /* USER CODE END 4 */
 
 /**
