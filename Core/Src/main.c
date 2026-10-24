@@ -21,7 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,7 +32,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define DARK_TH 1500
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -40,16 +41,23 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
 TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-volatile uint8_t motion_flag = 0;   // kesme bu bayrağı kaldırır
-uint8_t alarm_active = 0;           // 0 = Bekleme, 1 = Alarm
+volatile uint8_t motion_flag = 0;
+uint8_t armed = 0;
+uint8_t btn_prev = 0;
+uint8_t dark = 0;
+uint8_t alarm_active = 0;
 uint8_t buzzer_on = 0;
-uint32_t alarm_start = 0;           // alarmın (en son harekette) başladığı an
-uint32_t last_toggle = 0;           // buzzer'ın son açılıp kapandığı an
+uint16_t ldr = 0;
+uint32_t alarm_start = 0;
+uint32_t last_toggle = 0;
+uint32_t last_sense = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -57,13 +65,26 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM4_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void uart_print(const char *s)
+{
+    HAL_UART_Transmit(&huart2, (uint8_t*)s, strlen(s), 100);
+}
 
+uint16_t read_ldr(void)
+{
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 10);
+    uint16_t v = HAL_ADC_GetValue(&hadc1);
+    HAL_ADC_Stop(&hadc1);
+    return v;
+}
 /* USER CODE END 0 */
 
 /**
@@ -97,9 +118,10 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_TIM4_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 0);   // başta sessiz
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 0);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -109,46 +131,105 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  if (motion_flag)
-	      {
-	          motion_flag = 0;
-	          alarm_start = HAL_GetTick();          // süreyi baştan başlat
+	  uint32_t now = HAL_GetTick();
 
-	          if (!alarm_active)
+	      // 1) Her 200 ms'de B1 ve LDR kontrolü
+	      if (now - last_sense >= 200)
+	      {
+	          last_sense = now;
+
+	          uint8_t btn = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET);
+
+	          if (btn && !btn_prev)          // butona yeni basıldı
 	          {
-	              alarm_active = 1;
-	              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-	              HAL_UART_Transmit(&huart2, (uint8_t*)"ALARM ON\r\n", 10, 100);
+	              armed = !armed;            // toggle
+
+	              if (armed)
+	              {
+	                  uart_print("SYSTEM ARMED\r\n");
+	              }
+	              else
+	              {
+	                  uart_print("SYSTEM DISARMED\r\n");
+	                  alarm_active = 0;
+	                  buzzer_on = 0;
+	                  dark = 0;
+	                  motion_flag = 0;
+	                  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 0);
+	              }
 	          }
-	          else
+	          btn_prev = btn;
+
+	          if (armed)
 	          {
-	              HAL_UART_Transmit(&huart2, (uint8_t*)"Motion again, alarm extended\r\n", 30, 100);
+	              char buf[40];
+	              ldr = read_ldr();
+
+	              if (!dark && ldr < DARK_TH)
+	              {
+	                  dark = 1;
+	                  snprintf(buf, sizeof(buf), "Dark (LDR=%u)\r\n", ldr);
+	                  uart_print(buf);
+	              }
+	              else if (dark && ldr > DARK_TH + 300)   // +300: LED titremesin diye pay
+	              {
+	                  dark = 0;
+	                  snprintf(buf, sizeof(buf), "Light (LDR=%u)\r\n", ldr);
+	                  uart_print(buf);
+	              }
 	          }
 	      }
 
-	      // 2) Alarm sırasında buzzer'ı kesik kesik öttür
+	      // 2) Hareket geldi mi? (sistem kapalıysa yok say)
+	      if (motion_flag)
+	      {
+	          motion_flag = 0;
+
+	          if (armed)
+	          {
+	              alarm_start = now;
+
+	              if (!alarm_active)
+	              {
+	                  alarm_active = 1;
+	                  uart_print("ALARM ON\r\n");
+	              }
+	              else
+	              {
+	                  uart_print("Motion again, alarm extended\r\n");
+	              }
+	          }
+	      }
+
+	      // 3) Alarm: buzzer ve LED birlikte yanıp söner, 10 sn sonra kapanır
 	      if (alarm_active)
 	      {
-	          if (HAL_GetTick() - last_toggle >= 250)
+	          if (now - last_toggle >= 250)
 	          {
-	              last_toggle = HAL_GetTick();
+	              last_toggle = now;
 	              buzzer_on = !buzzer_on;
 	              __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, buzzer_on ? 500 : 0);
+	              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, buzzer_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
 	          }
 
-	          // 3) 10 saniye hareket gelmediyse alarmı kapat
-	          if (HAL_GetTick() - alarm_start >= 10000)
+	          if (now - alarm_start >= 10000)
 	          {
 	              alarm_active = 0;
 	              buzzer_on = 0;
 	              __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 0);
-	              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-	              HAL_UART_Transmit(&huart2, (uint8_t*)"ALARM OFF\r\n", 11, 100);
+	              uart_print("ALARM OFF\r\n");
 	          }
+	      }
+
+	      // 4) Alarm yokken LED sadece "sistem açık ve karanlık" ise yanar
+	      if (!alarm_active)
+	      {
+	          HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, (armed && dark) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+	      }
+}
   }
   /* USER CODE END 3 */
-}
-}
+
 
 /**
   * @brief System Clock Configuration
@@ -189,6 +270,58 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_84CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
@@ -296,11 +429,18 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PA5 */
   GPIO_InitStruct.Pin = GPIO_PIN_5;
@@ -329,7 +469,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     if (GPIO_Pin == GPIO_PIN_0)
     {
-        motion_flag = 1;   // ağır işi burada yapma, sadece bayrağı kaldır
+        motion_flag = 1;
     }
 }
 /* USER CODE END 4 */
