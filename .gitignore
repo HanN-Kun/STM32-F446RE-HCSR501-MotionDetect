@@ -1,0 +1,21 @@
+# Derleme ve çıktı klasörleri
+Debug/
+Release/
+
+# Derleme çıktı dosyaları
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.d
+*.su
+*.list
+
+# IDE ve kişisel kullanıcı ayarları
+.settings/
+*.launch
+
+# İşletim sistemi kalıntıları
+.DS_Store
+Thumbs.db
